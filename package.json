@@ -1,5 +1,5 @@
 {
-  "name": "finanzas-app",
+  "name": "trading-bot",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,7 +9,9 @@
     "lint": "eslint",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "db:seed": "npx tsx prisma/seed.ts"
+    "db:seed": "npx tsx prisma/seed.ts",
+    "bot:dev": "node --env-file=.env bot/index.js",
+    "bot:start": "node --env-file=.env bot/index.js"
   },
   "prisma": {
     "seed": "npx tsx prisma/seed.ts"
@@ -40,7 +42,12 @@
     "react-hook-form": "^7.71.2",
     "recharts": "^3.8.0",
     "tailwind-merge": "^3.5.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "ccxt": "^4.4.0",
+    "technicalindicators": "^3.1.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "node-cron": "^3.0.3",
+    "winston": "^3.17.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -52,6 +59,8 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "@types/node-telegram-bot-api": "^0.64.7",
+    "@types/node-cron": "^3.0.11"
   }
 }

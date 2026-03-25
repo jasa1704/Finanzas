@@ -1,120 +1,86 @@
-import { Header } from "@/components/layout/Header"
-import { StatsCards } from "@/components/dashboard/StatsCards"
-import { MonthlyChart } from "@/components/dashboard/MonthlyChart"
-import { RecentTransactions } from "@/components/dashboard/RecentTransactions"
-import { BudgetProgress } from "@/components/dashboard/BudgetProgress"
 import { auth } from "@/lib/auth"
-import { type DashboardStats } from "@/types"
-import { getMonthName, getCurrentMonthYear } from "@/lib/utils"
+import { db } from "@/lib/db"
+import { Header } from "@/components/layout/Header"
+import { PriceCard } from "@/components/dashboard/PriceCard"
+import { BotStats } from "@/components/dashboard/BotStats"
+import { EquityCurve } from "@/components/dashboard/EquityCurve"
+import { RecentTrades } from "@/components/dashboard/RecentTrades"
+import { BotStatusBadge } from "@/components/bot/BotStatusBadge"
+import type { DashboardStats, EquityPoint } from "@/types"
 
-async function getDashboardData(): Promise<DashboardStats | null> {
-  try {
-    const session = await auth()
-    if (!session?.user) return null
+async function getDashboardData(userId: string): Promise<DashboardStats> {
+  const now = new Date()
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
 
-    const { db } = await import("@/lib/db")
-    const { getCurrentMonthYear, getMonthName } = await import("@/lib/utils")
-    const { month, year } = getCurrentMonthYear()
+  const [allTrades, todayTrades, openPositions, recentTrades] = await Promise.all([
+    db.trade.findMany({ where: { userId, status: "CLOSED" } }),
+    db.trade.findMany({ where: { userId, status: "CLOSED", closedAt: { gte: todayStart } } }),
+    db.position.count({ where: { userId } }),
+    db.trade.findMany({ where: { userId }, orderBy: { openedAt: "desc" }, take: 10 }),
+  ])
 
-    const monthStart = new Date(year, month - 1, 1)
-    const monthEnd = new Date(year, month, 0, 23, 59, 59)
-    const userId = session.user.id
+  const totalPnl = allTrades.reduce((sum, t) => sum + parseFloat(t.pnl?.toString() ?? "0"), 0)
+  const todayPnl = todayTrades.reduce((sum, t) => sum + parseFloat(t.pnl?.toString() ?? "0"), 0)
 
-    const [incomeAgg, expenseAgg, transactionCount] = await Promise.all([
-      db.transaction.aggregate({
-        where: { userId, type: "INCOME", date: { gte: monthStart, lte: monthEnd } },
-        _sum: { amount: true },
-      }),
-      db.transaction.aggregate({
-        where: { userId, type: "EXPENSE", date: { gte: monthStart, lte: monthEnd } },
-        _sum: { amount: true },
-      }),
-      db.transaction.count({ where: { userId, date: { gte: monthStart, lte: monthEnd } } }),
-    ])
+  const winners = allTrades.filter((t) => parseFloat(t.pnl?.toString() ?? "0") > 0)
+  const winRate = allTrades.length > 0 ? (winners.length / allTrades.length) * 100 : 0
 
-    const totalIncome = Number(incomeAgg._sum.amount || 0)
-    const totalExpense = Number(expenseAgg._sum.amount || 0)
-
-    // Last 6 months
-    const monthlyData = []
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(year, month - 1 - i, 1)
-      const mStart = new Date(d.getFullYear(), d.getMonth(), 1)
-      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59)
-      const [inc, exp] = await Promise.all([
-        db.transaction.aggregate({ where: { userId, type: "INCOME", date: { gte: mStart, lte: mEnd } }, _sum: { amount: true } }),
-        db.transaction.aggregate({ where: { userId, type: "EXPENSE", date: { gte: mStart, lte: mEnd } }, _sum: { amount: true } }),
-      ])
-      monthlyData.push({
-        month: getMonthName(d.getMonth() + 1, true),
-        income: Number(inc._sum.amount || 0),
-        expense: Number(exp._sum.amount || 0),
-      })
-    }
-
-    const recentTransactions = await db.transaction.findMany({
-      where: { userId },
-      include: { category: true },
-      orderBy: { date: "desc" },
-      take: 5,
-    })
-
-    const budgets = await db.budget.findMany({
-      where: { userId, month, year },
-      include: { category: true },
-    })
-
-    const budgetProgress = await Promise.all(
-      budgets.map(async (budget) => {
-        const result = await db.transaction.aggregate({
-          where: { userId, categoryId: budget.categoryId, type: "EXPENSE", date: { gte: monthStart, lte: monthEnd } },
-          _sum: { amount: true },
-        })
-        const spent = Number(result._sum.amount || 0)
-        const limit = Number(budget.limitAmount)
-        return { ...budget, limitAmount: budget.limitAmount.toString(), spent, percentage: limit > 0 ? Math.min((spent / limit) * 100, 100) : 0 }
-      })
-    )
-
-    const [allIncome, allExpense] = await Promise.all([
-      db.transaction.aggregate({ where: { userId, type: "INCOME" }, _sum: { amount: true } }),
-      db.transaction.aggregate({ where: { userId, type: "EXPENSE" }, _sum: { amount: true } }),
-    ])
-    const balance = Number(allIncome._sum.amount || 0) - Number(allExpense._sum.amount || 0)
-
+  // Build equity curve from closed trades (sorted by closedAt)
+  const sortedTrades = [...allTrades].sort(
+    (a, b) => new Date(a.closedAt!).getTime() - new Date(b.closedAt!).getTime()
+  )
+  let runningEquity = 1000 // baseline capital
+  const equityCurve: EquityPoint[] = sortedTrades.map((t) => {
+    const pnl = parseFloat(t.pnl?.toString() ?? "0")
+    runningEquity += pnl
     return {
-      totalIncome,
-      totalExpense,
-      balance,
-      transactionCount,
-      monthlyData,
-      recentTransactions: recentTransactions.map((t) => ({ ...t, amount: t.amount.toString() })),
-      budgetProgress,
+      date: new Date(t.closedAt!).toLocaleDateString("es-CO", { month: "short", day: "numeric" }),
+      equity: parseFloat(runningEquity.toFixed(2)),
+      pnl: parseFloat(pnl.toFixed(2)),
     }
-  } catch {
-    return null
+  })
+
+  return {
+    totalPnl,
+    todayPnl,
+    winRate,
+    totalTrades: allTrades.length,
+    openPositions,
+    currentPrice: null,
+    equityCurve,
+    recentTrades: recentTrades.map((t) => ({
+      ...t,
+      entryPrice: t.entryPrice.toString(),
+      exitPrice: t.exitPrice?.toString() ?? null,
+      quantity: t.quantity.toString(),
+      pnl: t.pnl?.toString() ?? null,
+      pnlPercent: t.pnlPercent?.toString() ?? null,
+      stopLoss: t.stopLoss?.toString() ?? null,
+      takeProfit: t.takeProfit?.toString() ?? null,
+    })),
   }
 }
 
 export default async function DashboardPage() {
-  const data = await getDashboardData()
-  const { month, year } = getCurrentMonthYear()
+  const session = await auth()
+  if (!session?.user?.id) return null
+
+  const [data, config] = await Promise.all([
+    getDashboardData(session.user.id),
+    db.botConfig.findUnique({ where: { userId: session.user.id } }),
+  ])
 
   return (
     <div>
-      <Header title={`${getMonthName(month)} ${year}`} />
-      <div className="space-y-4 pt-4 pb-6">
-        <StatsCards
-          balance={data?.balance ?? 0}
-          totalIncome={data?.totalIncome ?? 0}
-          totalExpense={data?.totalExpense ?? 0}
-          transactionCount={data?.transactionCount ?? 0}
-        />
-        <MonthlyChart data={data?.monthlyData ?? []} />
-        <RecentTransactions transactions={(data?.recentTransactions ?? []) as any} />
-        {(data?.budgetProgress?.length ?? 0) > 0 && (
-          <BudgetProgress budgets={data!.budgetProgress as any} />
-        )}
+      <Header
+        title="Dashboard"
+        right={config && <BotStatusBadge isActive={config.isActive} mode={config.mode as "PAPER" | "LIVE"} />}
+      />
+      <div className="space-y-4 pt-4 pb-6 px-4">
+        <PriceCard />
+        <BotStats stats={data} />
+        <EquityCurve data={data.equityCurve} />
+        <RecentTrades trades={data.recentTrades as any} />
       </div>
     </div>
   )

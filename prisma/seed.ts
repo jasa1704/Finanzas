@@ -1,52 +1,106 @@
 import { PrismaClient } from "@prisma/client"
+import { PrismaPg } from "@prisma/adapter-pg"
+import bcrypt from "bcryptjs"
 
-const prisma = new PrismaClient()
-
-const systemCategories = [
-  // Income
-  { name: "Salario", type: "INCOME" as const, color: "#10b981", icon: "briefcase" },
-  { name: "Freelance", type: "INCOME" as const, color: "#059669", icon: "laptop" },
-  { name: "Inversiones", type: "INCOME" as const, color: "#0d9488", icon: "trending-up" },
-  { name: "Negocio", type: "INCOME" as const, color: "#0891b2", icon: "store" },
-  { name: "Otros ingresos", type: "INCOME" as const, color: "#6366f1", icon: "plus-circle" },
-  // Expense
-  { name: "Alimentación", type: "EXPENSE" as const, color: "#f43f5e", icon: "utensils" },
-  { name: "Transporte", type: "EXPENSE" as const, color: "#f97316", icon: "car" },
-  { name: "Vivienda", type: "EXPENSE" as const, color: "#eab308", icon: "home" },
-  { name: "Salud", type: "EXPENSE" as const, color: "#ec4899", icon: "heart" },
-  { name: "Entretenimiento", type: "EXPENSE" as const, color: "#a855f7", icon: "tv" },
-  { name: "Educación", type: "EXPENSE" as const, color: "#3b82f6", icon: "book-open" },
-  { name: "Ropa", type: "EXPENSE" as const, color: "#8b5cf6", icon: "shirt" },
-  { name: "Servicios", type: "EXPENSE" as const, color: "#06b6d4", icon: "zap" },
-  { name: "Restaurantes", type: "EXPENSE" as const, color: "#ef4444", icon: "coffee" },
-  { name: "Viajes", type: "EXPENSE" as const, color: "#14b8a6", icon: "plane" },
-  { name: "Mascotas", type: "EXPENSE" as const, color: "#d97706", icon: "paw-print" },
-  { name: "Deportes", type: "EXPENSE" as const, color: "#22c55e", icon: "dumbbell" },
-  { name: "Otros gastos", type: "EXPENSE" as const, color: "#94a3b8", icon: "more-horizontal" },
-]
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! })
+const db = new PrismaClient({ adapter })
 
 async function main() {
-  console.log("Seeding system categories...")
-  for (const category of systemCategories) {
-    await prisma.category.upsert({
-      where: {
-        id: `system_${category.name.toLowerCase().replace(/\s/g, "_")}`,
-      },
-      update: {},
-      create: {
-        id: `system_${category.name.toLowerCase().replace(/\s/g, "_")}`,
-        name: category.name,
-        type: category.type,
-        color: category.color,
-        icon: category.icon,
-        isSystem: true,
-        userId: null,
+  console.log("🌱  Seeding trading bot database...")
+
+  // Demo user
+  const hashed = await bcrypt.hash("demo1234", 10)
+  const user = await db.user.upsert({
+    where: { email: "demo@tradingbot.dev" },
+    update: {},
+    create: {
+      email: "demo@tradingbot.dev",
+      name: "Demo Trader",
+      hashedPassword: hashed,
+    },
+  })
+
+  // Default bot config
+  await db.botConfig.upsert({
+    where: { userId: user.id },
+    update: {},
+    create: {
+      userId: user.id,
+      exchange: "binance",
+      symbol: "BTC/USDT",
+      strategy: "EMA_CROSS",
+      mode: "PAPER",
+      isActive: false,
+      capitalPercent: 2,
+      maxDrawdown: 10,
+      maxDailyLoss: 3,
+    },
+  })
+
+  // Sample paper trades
+  const sampleTrades = [
+    { side: "BUY",  entry: 68500, exit: 71200,  qty: 0.0029, daysAgo: 10 },
+    { side: "BUY",  entry: 70100, exit: 69300,  qty: 0.0028, daysAgo: 7  },
+    { side: "SELL", entry: 69800, exit: 68200,  qty: 0.0030, daysAgo: 5  },
+    { side: "BUY",  entry: 67900, exit: 70500,  qty: 0.0031, daysAgo: 3  },
+    { side: "BUY",  entry: 71000, exit: null,   qty: 0.0028, daysAgo: 1  },
+  ]
+
+  for (const t of sampleTrades) {
+    const openedAt  = new Date(Date.now() - t.daysAgo * 86_400_000)
+    const closedAt  = t.exit ? new Date(openedAt.getTime() + 86_400_000) : null
+    const pnl       = t.exit
+      ? t.side === "BUY"
+        ? (t.exit - t.entry) * t.qty
+        : (t.entry - t.exit) * t.qty
+      : null
+    const pnlPercent = t.exit
+      ? ((t.exit - t.entry) / t.entry) * 100 * (t.side === "BUY" ? 1 : -1)
+      : null
+
+    await db.trade.create({
+      data: {
+        userId:       user.id,
+        symbol:       "BTC/USDT",
+        side:         t.side as any,
+        entryPrice:   t.entry,
+        exitPrice:    t.exit ?? undefined,
+        quantity:     t.qty,
+        pnl:          pnl       ?? undefined,
+        pnlPercent:   pnlPercent ?? undefined,
+        status:       t.exit ? "CLOSED" : "OPEN",
+        strategy:     "EMA_CROSS",
+        stopLoss:     t.side === "BUY" ? t.entry * 0.985 : t.entry * 1.015,
+        takeProfit:   t.side === "BUY" ? t.entry * 1.030 : t.entry * 0.970,
+        openedAt,
+        closedAt,
       },
     })
   }
-  console.log(`✅ ${systemCategories.length} system categories created`)
+
+  // Sample log entries
+  const logEntries = [
+    { level: "INFO",   event: "BOT_START",       message: "Bot started in PAPER mode" },
+    { level: "SIGNAL", event: "SIGNAL",           message: "EMA(9) crossed above EMA(21) — BUY signal" },
+    { level: "ORDER",  event: "POSITION_OPENED",  message: "BUY 0.0029 BTC/USDT @ 68500" },
+    { level: "ORDER",  event: "POSITION_CLOSED",  message: "Closed BTC/USDT @ 71200 | PnL: +7.83 USDT" },
+    { level: "INFO",   event: "BOT_STOP",         message: "Bot stopped — manual" },
+  ]
+
+  for (const entry of logEntries) {
+    await db.botLog.create({
+      data: {
+        userId:  user.id,
+        level:   entry.level as any,
+        event:   entry.event,
+        message: entry.message,
+      },
+    })
+  }
+
+  console.log("✅  Seed complete — demo@tradingbot.dev / demo1234")
 }
 
 main()
-  .catch(console.error)
-  .finally(() => prisma.$disconnect())
+  .catch((e) => { console.error(e); process.exit(1) })
+  .finally(() => db.$disconnect())
